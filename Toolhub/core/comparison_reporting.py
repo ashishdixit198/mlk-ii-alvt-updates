@@ -4,7 +4,7 @@ from datetime import datetime
 from reportlab.pdfgen import canvas
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    HRFlowable, Image
+    HRFlowable, Image, KeepTogether
 )
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -145,16 +145,16 @@ def generate_comparison_report(out_path, header_data, diff_data, signatures, opt
     
     # Use hex strings directly for HTML fonts
     c_map_hex = {
-        'insert_bg': custom_colors.get('insert_bg', '#FFEBEE'),
-        'insert_fg': custom_colors.get('insert_fg', '#C62828'),
-        'delete_bg': custom_colors.get('delete_bg', '#E8F5E9'),
-        'delete_fg': custom_colors.get('delete_fg', '#2E7D32'),
-        'replace_bg': custom_colors.get('replace_bg', '#FFFF00'),
-        'replace_fg': custom_colors.get('replace_fg', '#000000'),
-        'intra_left_bg': custom_colors.get('intra_left_bg', '#00FF00'),
-        'intra_left_fg': custom_colors.get('intra_left_fg', '#000000'),
-        'intra_right_bg': custom_colors.get('intra_right_bg', '#FF3333'),
-        'intra_right_fg': custom_colors.get('intra_right_fg', '#000000'),
+        'insert_bg': custom_colors.get('insert_bg', '#E8F5E9'), # Light Green
+        'insert_fg': custom_colors.get('insert_fg', '#2E7D32'), # Dark Green
+        'delete_bg': custom_colors.get('delete_bg', '#FFEBEE'), # Light Red
+        'delete_fg': custom_colors.get('delete_fg', '#C62828'), # Dark Red
+        'replace_bg': custom_colors.get('replace_bg', '#FFFDE7'), # Light Yellow
+        'replace_fg': custom_colors.get('replace_fg', '#F57F17'), # Dark Yellow
+        'intra_left_bg': custom_colors.get('intra_left_bg', '#e1f5fe'), # Blue-ish for intra
+        'intra_left_fg': custom_colors.get('intra_left_fg', '#01579b'),
+        'intra_right_bg': custom_colors.get('intra_right_bg', '#f3e5f5'), # Purple-ish
+        'intra_right_fg': custom_colors.get('intra_right_fg', '#4a148c'),
     }
 
     doc = SimpleDocTemplate(
@@ -273,4 +273,153 @@ def generate_comparison_report(out_path, header_data, diff_data, signatures, opt
     
     canvas_args = {'header_data': header_data, 'signatures': signatures, 'show_grid': show_grid}
     doc.build(story, canvasmaker=lambda *args, **kwargs: ComparisonCanvas(*args, **canvas_args, **kwargs))
+    return out_path
+
+# --- Functional (Section-Aware) Reporting ---
+
+SECTION_BLUE  = colors.HexColor('#1565C0')
+CLR_ADDED     = colors.HexColor('#E8F5E9')
+CLR_DELETED   = colors.HexColor('#FFEBEE')
+CLR_MODIFIED  = colors.HexColor('#FFFDE7')
+CLR_OK        = colors.HexColor('#F1F8E9')
+CLR_CHANGED   = colors.HexColor('#FFF3E0')
+DARK_GREEN    = colors.HexColor('#2E7D32')
+DARK_RED      = colors.HexColor('#C62828')
+DARK_AMBER    = colors.HexColor('#E65100')
+
+class FuncCompCanvas(canvas.Canvas):
+    """Custom canvas for functional reports."""
+    def __init__(self, *args, **kwargs):
+        self.header_data  = kwargs.pop('header_data',  {})
+        self.signatures   = kwargs.pop('signatures',   [])
+        self.show_grid    = kwargs.pop('show_grid',    True)
+        canvas.Canvas.__init__(self, *args, **kwargs)
+        self._saved_page_states = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def _draw_header(self):
+        self.saveState()
+        w = self._pagesize[0]
+        top = self._pagesize[1]
+        self.setFont('Helvetica-Bold', 11)
+        self.setFillColor(HITACHI_RED)
+        self.drawCentredString(w / 2, top - 22, "Functional Logic Comparison Report")
+        file_a = os.path.basename(self.header_data.get('path_a', 'File A'))
+        file_b = os.path.basename(self.header_data.get('path_b', 'File B'))
+        self.setFont('Helvetica-Bold', 8)
+        self.setFillColor(colors.black)
+        self.drawString(50, top - 36, f"Old: {file_a}  (CRC={self.header_data.get('crc_a','-')}, Checksum={self.header_data.get('checksum_a','-')})")
+        self.drawString(50, top - 48, f"New: {file_b}  (CRC={self.header_data.get('crc_b','-')}, Checksum={self.header_data.get('checksum_b','-')})")
+        self.setStrokeColor(colors.lightgrey)
+        self.setLineWidth(0.5)
+        self.line(50, top - 54, w - 50, top - 54)
+        self.restoreState()
+
+    def _draw_footer(self, page_count):
+        self.saveState()
+        footer_y = 25
+        ts = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
+        self.setFont('Helvetica', 8)
+        self.drawString(50, footer_y, f"Page {self._pageNumber} of {page_count} | Generated: {ts}")
+        if self.signatures:
+            num_sig = len(self.signatures); page_width = self._pagesize[0]; cw = (page_width - 100) / num_sig
+            row_top, row_labels = [], []
+            for sig in self.signatures:
+                p = Paragraph(f"<b>{sig.get('name','')}</b>", ParagraphStyle('fn', fontSize=8, alignment=TA_CENTER))
+                row_top.append(p); row_labels.append(sig.get('label', ''))
+            t = Table([row_top, row_labels], colWidths=[cw] * num_sig, rowHeights=[28, 18])
+            t.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.black), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('FONTSIZE', (0,0), (-1,-1), 8), ('FONTNAME', (0,1), (-1,1), 'Helvetica-Bold'), ('BACKGROUND', (0,1), (-1,1), colors.whitesmoke)]))
+            t.wrapOn(self, 50, footer_y + 15); t.drawOn(self, 50, footer_y + 15)
+        self.restoreState()
+
+    def save(self):
+        n = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state); self._draw_header(); self._draw_footer(n); canvas.Canvas.showPage(self)
+        canvas.Canvas.save(self)
+
+def generate_functional_report(out_path, header_data, section_diffs, signatures, options=None):
+    if options is None: options = {}
+    show_grid = options.get('show_grid', True)
+    custom_c = options.get('colors', {})
+    context_lines = options.get('context_lines', 10)
+    c_map = {
+        'delete_bg': custom_c.get('delete_bg', '#E8F5E9'), 'delete_fg': custom_c.get('delete_fg', '#2E7D32'),
+        'insert_bg': custom_c.get('insert_bg', '#FFEBEE'), 'insert_fg': custom_c.get('insert_fg', '#C62828'),
+        'replace_bg': custom_c.get('replace_bg', '#FFFDE7'), 'replace_fg': custom_c.get('replace_fg', '#E65100'),
+        'intra_left_bg': custom_c.get('intra_left_bg', '#C8E6C9'), 'intra_left_fg': custom_c.get('intra_left_fg', '#1B5E20'),
+        'intra_right_bg': custom_c.get('intra_right_bg', '#FFCDD2'), 'intra_right_fg': custom_c.get('intra_right_fg', '#B71C1C'),
+    }
+    doc = SimpleDocTemplate(out_path, pagesize=landscape(letter), leftMargin=0.5*inch, rightMargin=0.5*inch, topMargin=0.85*inch, bottomMargin=1.5*inch)
+    styles = getSampleStyleSheet()
+    code_style = ParagraphStyle('Code', parent=styles['Normal'], fontName='Courier', fontSize=8, leading=10)
+    sec_hdr_style = ParagraphStyle('SecHdr', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=11, textColor=colors.white, alignment=TA_CENTER)
+    title_style = ParagraphStyle('Title', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=13, textColor=HITACHI_RED, alignment=TA_CENTER)
+    note_style = ParagraphStyle('Note', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.grey, alignment=TA_CENTER)
+    story = []
+    page_w = landscape(letter)[0] - inch
+    story.append(Spacer(1, 0.1*inch)); story.append(Paragraph("Section-Wise Change Summary", title_style)); story.append(Spacer(1, 0.08*inch))
+    file_a = os.path.basename(header_data.get('path_a', 'Old File')); file_b = os.path.basename(header_data.get('path_b', 'New File'))
+    story.append(Paragraph(f"Comparing: <b>{file_a}</b> &rarr; <b>{file_b}</b>", note_style)); story.append(Spacer(1, 0.15*inch))
+    sum_rows = [[Paragraph('<b>#</b>', code_style), Paragraph('<b>Section</b>', code_style), Paragraph('<b>Status</b>', code_style), Paragraph('<b>Added</b>', code_style), Paragraph('<b>Deleted</b>', code_style), Paragraph('<b>Modified</b>', code_style), Paragraph('<b>Unchanged</b>', code_style)]]
+    sum_styles = [('BACKGROUND', (0,0), (-1,0), colors.HexColor('#EEEEEE')), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('VALIGN', (0,0), (-1,-1), 'MIDDLE')]
+    if show_grid: sum_styles.insert(0, ('GRID', (0,0), (-1,-1), 0.4, colors.grey))
+    else: sum_styles.insert(0, ('LINEBELOW', (0,0), (-1,0), 1, colors.black))
+    total_added = total_deleted = total_modified = 0
+    for i, sd in enumerate(section_diffs, start=1):
+        if not sd.text_a and not sd.text_b: status_txt, bg = '⬛ Not Present', colors.whitesmoke
+        elif sd.has_changes: status_txt, bg = '⚠ Changed', colors.HexColor('#FFF8E1')
+        else: status_txt, bg = '✅ No Changes', colors.HexColor('#F1F8E9')
+        total_added += sd.added; total_deleted += sd.deleted; total_modified += sd.modified
+        sum_rows.append([str(i), sd.name, status_txt, str(sd.added) if sd.has_changes else '—', str(sd.deleted) if sd.has_changes else '—', str(sd.modified) if sd.has_changes else '—', str(sd.unchanged)])
+        sum_styles.append(('BACKGROUND', (0, i), (-1, i), bg))
+    sum_rows.append(['', 'TOTAL', '', str(total_added), str(total_deleted), str(total_modified), ''])
+    sum_styles.append(('BACKGROUND', (0, len(sum_rows)-1), (-1, len(sum_rows)-1), colors.HexColor('#EEEEEE')))
+    sum_styles.append(('FONTNAME', (0, len(sum_rows)-1), (-1, len(sum_rows)-1), 'Helvetica-Bold'))
+    sum_table = Table(sum_rows, colWidths=[30, page_w*0.32, page_w*0.14, page_w*0.10, page_w*0.10, page_w*0.10, page_w*0.12])
+    sum_table.setStyle(TableStyle(sum_styles)); story.append(sum_table)
+    changed_sections = [sd for sd in section_diffs if sd.has_changes]
+    if not changed_sections:
+        story.append(Spacer(1, 0.3*inch)); story.append(Paragraph("✅ No functional differences found.", ParagraphStyle('ok', parent=styles['Normal'], fontSize=12, textColor=DARK_GREEN, alignment=TA_CENTER)))
+    else:
+        for sd in changed_sections:
+            story.append(Spacer(1, 0.25*inch)); story.append(HRFlowable(width='100%', thickness=1, color=SECTION_BLUE)); story.append(Spacer(1, 0.06*inch))
+            hdr_table = Table([[Paragraph(f"SECTION: {sd.name.upper()}", sec_hdr_style)]], colWidths=[page_w])
+            hdr_table.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,-1), SECTION_BLUE), ('TOPPADDING', (0,0), (-1,-1), 6), ('BOTTOMPADDING', (0,0), (-1,-1), 6)]))
+            story.append(KeepTogether([hdr_table])); story.append(Spacer(1, 0.08*inch))
+            summary_txt = f"Changes: <b><font color='#C62828'>+{sd.added} added</font></b>  <b><font color='#2E7D32'>−{sd.deleted} deleted</font></b>  <b><font color='#E65100'>~{sd.modified} modified</font></b>"
+            story.append(Paragraph(summary_txt, ParagraphStyle('sum', parent=styles['Normal'], fontSize=9, alignment=TA_LEFT))); story.append(Spacer(1, 0.06*inch))
+            diff_data = sd.changes; include = set()
+            for j, (tag, _, _) in enumerate(diff_data):
+                if tag != 'equal':
+                    for k in range(max(0, j-context_lines), min(len(diff_data), j+context_lines+1)): include.add(k)
+            text_col_w = (page_w - 50) / 2
+            diff_rows = [[Paragraph('<b>#</b>', code_style), Paragraph(f'<b>{file_a} (Old)</b>', code_style), Paragraph(f'<b>{file_b} (New)</b>', code_style)]]
+            diff_styles = [('BACKGROUND', (0,0), (-1,0), colors.HexColor('#EEEEEE')), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('VALIGN', (0,0), (-1,-1), 'TOP'), ('ALIGN', (0,0), (0,-1), 'CENTER')]
+            if show_grid: diff_styles.insert(0, ('GRID', (0,0), (-1,-1), 0.25, colors.grey))
+            else: diff_styles.insert(0, ('LINEBELOW', (0,0), (-1,0), 1, colors.black))
+            curr_r = 1; last_j = -1
+            def _to_h(content, fg, is_l=False):
+                if not isinstance(content, list): return f'<font color="{fg}">{str(content).replace("<","&lt;").replace(">","&gt;")}</font>' if fg else str(content).replace("<","&lt;").replace(">","&gt;")
+                parts = []
+                for p in content:
+                    if isinstance(p, tuple) and p[0] == 'changed':
+                        px = 'intra_left' if is_l else 'intra_right'
+                        parts.append(f'<font backColor="{c_map[px+"_bg"]}" color="{c_map[px+"_fg"]}">{p[1].replace("<","&lt;").replace(">","&gt;")}</font>')
+                    else: parts.append(f'<font color="{fg}">{str(p).replace("<","&lt;").replace(">","&gt;")}</font>' if fg else str(p).replace("<","&lt;").replace(">","&gt;"))
+                return ''.join(parts)
+            for j, (tag, ta, tb) in enumerate(diff_data):
+                if j not in include: continue
+                if last_j != -1 and j > last_j + 1:
+                    diff_rows.append(['…', '…', '…']); diff_styles.append(('BACKGROUND', (0, curr_r), (-1, curr_r), colors.whitesmoke)); curr_r += 1
+                bgx = colors.HexColor(c_map[tag+'_bg']) if tag != 'equal' else None
+                fgx = c_map.get(tag+'_fg') if tag != 'equal' else None
+                if bgx: diff_styles.append(('BACKGROUND', (0, curr_r), (-1, curr_r), bgx))
+                diff_rows.append([str(j+1), Paragraph(_to_h(ta, fgx, True), code_style), Paragraph(_to_h(tb, fgx, False), code_style)])
+                curr_r += 1; last_j = j
+            diff_table = Table(diff_rows, colWidths=[50, text_col_w, text_col_w], repeatRows=1); diff_table.setStyle(TableStyle(diff_styles)); story.append(diff_table)
+    doc.build(story, canvasmaker=lambda *a, **kw: FuncCompCanvas(*a, header_data=header_data, signatures=signatures, show_grid=show_grid, **kw))
     return out_path
